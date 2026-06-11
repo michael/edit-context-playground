@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>EditContext plain text editor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <style>
+    body {
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 0 20px;
+      font-family: system-ui, sans-serif;
+      color: #111;
+    }
+
+    #editor {
+      border: 1px solid #999;
+      padding: 16px;
+      min-height: 120px;
+      font: 18px/1.6 ui-monospace, Menlo, Consolas, monospace;
+      white-space: pre-wrap;       /* render \n in the model as line breaks */
+      overflow-wrap: anywhere;
+    }
+
+    #editor:focus {
+      outline: 2px solid #06f;
+    }
+
+    #editor p {
+      margin: 0;
+    }
+
+    /* Visualization of text that is currently being composed (IME / dead keys) */
+    .composing {
+      background: rgb(255 220 0 / 0.4);
+      text-decoration: underline dotted 2px;
+      text-underline-offset: 4px;
+    }
+
+    #status {
+      margin-top: 12px;
+      font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace;
+      color: #666;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>EditContext plain text editor</h1>
+  <p>
+    Click somewhere in the editor and type. Regular characters update the
+    document directly. A dead key (e.g. <kbd>`</kbd> or <kbd>´</kbd>) or an IME
+    starts a composition, which is highlighted until it is committed.
+  </p>
+
+  <div id="editor"></div>
+  <div id="status"></div>
+
+  <script>
+    const editor = document.getElementById('editor');
+    const status = document.getElementById('status');
+
+    if (!('EditContext' in window)) {
+      editor.textContent = 'This browser does not support the EditContext API (try Chrome or Edge).';
+      throw new Error('EditContext not supported');
+    }
+
+    // ------------------------------------------------------------------
+    // 1. Document model
+    //
+    // The model is just a plain text string plus a selection (two offsets
+    // into that string). Everything in the DOM is merely a *view* of this
+    // model, rendered as <p>the text string</p> by render() below.
+    // ------------------------------------------------------------------
+    const doc = {
+      text: 'Hello world. Place the cursor anywhere and type, or compose with a dead key.',
+      selection_start: 0,
+      selection_end: 0,
+    };
+
+    // Transient composition state, only used to visualize in-progress input.
+    let is_composing = false;
+    let composition_formats = [];  // TextFormat ranges from 'textformatupdate'
+
+    // The single <p> element the model is rendered into.
+    const paragraph = document.createElement('p');
+    editor.append(paragraph);
+
+    // ------------------------------------------------------------------
+    // 2. EditContext setup
+    //
+    // Associating an EditContext makes the div focusable and lets it
+    // receive text input (including IME composition) without the browser
+    // mutating the DOM itself — we stay in full control of rendering.
+    // The EditContext keeps its own copy of the text, so whenever we
+    // change the model ourselves we must mirror it via updateText() /
+    // updateSelection().
+    // ------------------------------------------------------------------
+    const edit_context = new EditContext({
+      text: doc.text,
+      selectionStart: doc.selection_start,
+      selectionEnd: doc.selection_end,
+    });
+    editor.editContext = edit_context;
+
+    // ------------------------------------------------------------------
+    // 3. EditContext events  (input → model)
+    // ------------------------------------------------------------------
+
+    // 'textupdate' is the single entry point for ALL text input: regular
+    // typing, Backspace/Delete, dead keys, and every intermediate IME
+    // composition update. It describes a replacement: the range
+    // [updateRangeStart, updateRangeEnd) of the old text becomes event.text.
+    edit_context.addEventListener('textupdate', (event) => {
+      doc.text =
+        doc.text.slice(0, event.updateRangeStart) +
+        event.text +
+        doc.text.slice(event.updateRangeEnd);
+
+      doc.selection_start = event.selectionStart;
+      doc.selection_end = event.selectionEnd;
+
+      render();
+    });
+
+    // 'textformatupdate' fires during composition. The IME tells us which
+    // text ranges should be decorated (e.g. underline the active clause).
+    // This is what lets us visualize the in-progress composition.
+    edit_context.addEventListener('textformatupdate', (event) => {
+      composition_formats = event.getTextFormats();
+      render();
+    });
+
+    // 'characterboundsupdate' is the IME asking where certain characters
+    // are on screen, so it can position its candidate window. We measure
+    // them in the rendered DOM and report back.
+    edit_context.addEventListener('characterboundsupdate', (event) => {
+      const rects = [];
+      for (let i = event.rangeStart; i < event.rangeEnd; i++) {
+        rects.push(character_rect(i));
+      }
+      edit_context.updateCharacterBounds(event.rangeStart, rects);
+    });
+
+    // Composition lifecycle — we only use it to track state and to clear
+    // the decoration ranges once the composition is committed/cancelled.
+    edit_context.addEventListener('compositionstart', () => {
+      is_composing = true;
+      update_status();
+    });
+
+    edit_context.addEventListener('compositionend', () => {
+      is_composing = false;
+      composition_formats = [];
+      render();
+    });
+
+    // ------------------------------------------------------------------
+    // 4. DOM events  (user interaction → EditContext)
+    // ------------------------------------------------------------------
+
+    // We use the native DOM selection as our caret: clicking (or dragging)
+    // in the static text places it. On every change we translate it into
+    // model offsets and tell the EditContext, so the next keystroke is
+    // inserted at the right position.
+    document.addEventListener('selectionchange', () => {
+      const dom_selection = document.getSelection();
+      if (!dom_selection.rangeCount || !editor.contains(dom_selection.anchorNode)) return;
+
+      const anchor = dom_position_to_offset(dom_selection.anchorNode, dom_selection.anchorOffset);
+      const focus = dom_position_to_offset(dom_selection.focusNode, dom_selection.focusOffset);
+
+      doc.selection_start = Math.min(anchor, focus);
+      doc.selection_end = Math.max(anchor, focus);
+
+      edit_context.updateSelection(doc.selection_start, doc.selection_end);
+      // Tells the IME where the selection is, for candidate window placement.
+      edit_context.updateSelectionBounds(dom_selection.getRangeAt(0).getBoundingClientRect());
+
+      update_status();
+    });
+
+    // The EditContext delivers *text* input, but it does NOT handle editing
+    // commands (Enter, Tab) and does not move the caret. A real editor
+    // implements those itself; we keep it minimal here.
+    editor.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        insert_text('\n');
+      } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        move_caret(-1);
+      } else if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        move_caret(1);
+      }
+    });
+
+    // Tells the IME where the editable region is on screen.
+    function update_control_bounds() {
+      edit_context.updateControlBounds(editor.getBoundingClientRect());
+    }
+    editor.addEventListener('focus', update_control_bounds);
+    window.addEventListener('resize', update_control_bounds);
+
+    // ------------------------------------------------------------------
+    // 5. Model mutations initiated by us (not by the EditContext)
+    //
+    // These must keep the EditContext's internal text/selection in sync.
+    // ------------------------------------------------------------------
+    function insert_text(new_text) {
+      const start = doc.selection_start;
+      const end = doc.selection_end;
+
+      doc.text = doc.text.slice(0, start) + new_text + doc.text.slice(end);
+      doc.selection_start = doc.selection_end = start + new_text.length;
+
+      edit_context.updateText(start, end, new_text);
+      edit_context.updateSelection(doc.selection_start, doc.selection_end);
+
+      render();
+    }
+
+    function move_caret(delta) {
+      let position;
+      if (doc.selection_start !== doc.selection_end) {
+        // Collapse an existing selection to one of its ends.
+        position = delta < 0 ? doc.selection_start : doc.selection_end;
+      } else {
+        position = Math.max(0, Math.min(doc.text.length, doc.selection_start + delta));
+      }
+
+      doc.selection_start = doc.selection_end = position;
+      edit_context.updateSelection(position, position);
+
+      render();
+    }
+
+    // ------------------------------------------------------------------
+    // 6. Rendering  (model → DOM)
+    // ------------------------------------------------------------------
+    function render() {
+      // Rebuild the paragraph from the model: plain text, with any range
+      // that is currently being composed wrapped in a highlighted span.
+      paragraph.replaceChildren();
+
+      for (const segment of build_segments()) {
+        if (segment.composing) {
+          const span = document.createElement('span');
+          span.className = 'composing';
+          span.textContent = segment.text;
+          paragraph.append(span);
+        } else if (segment.text) {
+          paragraph.append(document.createTextNode(segment.text));
+        }
+      }
+
+      // A trailing <br> keeps an empty document / empty last line clickable.
+      if (doc.text === '' || doc.text.endsWith('\n')) {
+        paragraph.append(document.createElement('br'));
+      }
+
+      restore_dom_selection();
+      update_status();
+    }
+
+    // Split the text into segments at the composition format boundaries.
+    function build_segments() {
+      if (composition_formats.length === 0) {
+        return [{ text: doc.text, composing: false }];
+      }
+
+      const boundaries = new Set([0, doc.text.length]);
+      for (const format of composition_formats) {
+        boundaries.add(format.rangeStart);
+        boundaries.add(format.rangeEnd);
+      }
+
+      const points = [...boundaries].sort((a, b) => a - b);
+      const segments = [];
+
+      for (let i = 0; i < points.length - 1; i++) {
+        const start = points[i];
+        const end = points[i + 1];
+        segments.push({
+          text: doc.text.slice(start, end),
+          composing: composition_formats.some(
+            (format) => start < format.rangeEnd && end > format.rangeStart
+          ),
+        });
+      }
+
+      return segments;
+    }
+
+    // After re-rendering, put the DOM caret/selection back where the model
+    // says it is (the rebuild destroyed the previous DOM selection).
+    function restore_dom_selection() {
+      if (document.activeElement !== editor) return;
+
+      const start = offset_to_dom_position(doc.selection_start);
+      const end = offset_to_dom_position(doc.selection_end);
+
+      const range = document.createRange();
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+
+      const dom_selection = document.getSelection();
+      dom_selection.removeAllRanges();
+      dom_selection.addRange(range);
+    }
+
+    // ------------------------------------------------------------------
+    // 7. Mapping between model offsets and DOM positions
+    // ------------------------------------------------------------------
+
+    // DOM position → model offset: measure the text between the start of
+    // the paragraph and the given position.
+    function dom_position_to_offset(node, node_offset) {
+      const range = document.createRange();
+      range.selectNodeContents(paragraph);
+      range.setEnd(node, node_offset);
+      return range.toString().length;
+    }
+
+    // Model offset → DOM position: walk the paragraph's text nodes.
+    function offset_to_dom_position(offset) {
+      const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT);
+      let remaining = offset;
+      let node;
+
+      while ((node = walker.nextNode())) {
+        if (remaining <= node.data.length) {
+          return { node, offset: remaining };
+        }
+        remaining -= node.data.length;
+      }
+
+      // Empty paragraph, or offset at the very end after a trailing <br>.
+      return { node: paragraph, offset: paragraph.childNodes.length };
+    }
+
+    // Screen rectangle of the character at the given model offset.
+    function character_rect(index) {
+      const start = offset_to_dom_position(index);
+      const end = offset_to_dom_position(index + 1);
+
+      const range = document.createRange();
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+
+      return range.getBoundingClientRect();
+    }
+
+    // ------------------------------------------------------------------
+    // 8. Debug status line — shows the model state, so you can see that
+    //    the DOM is purely derived from it.
+    // ------------------------------------------------------------------
+    function update_status() {
+      status.textContent =
+        `model text (${doc.text.length} chars): ${JSON.stringify(doc.text)}\n` +
+        `selection: [${doc.selection_start}, ${doc.selection_end}]` +
+        (is_composing ? '  — composing…' : '');
+    }
+
+    render();
+    update_control_bounds();
+  </script>
+</body>
+</html>
