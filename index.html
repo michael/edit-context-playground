@@ -31,13 +31,6 @@
       margin: 0;
     }
 
-    /* Visualization of text that is currently being composed (IME / dead keys) */
-    .composing {
-      background: rgb(255 220 0 / 0.4);
-      text-decoration: underline dotted 2px;
-      text-underline-offset: 4px;
-    }
-
     #status {
       margin-top: 12px;
       font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace;
@@ -63,7 +56,8 @@
   <p>
     Click somewhere in the editor and type. Regular characters update the
     document directly. A dead key (e.g. <kbd>`</kbd> or <kbd>´</kbd>) or an IME
-    starts a composition, which is highlighted until it is committed.
+    starts a composition — the provisional text lands in the model and is
+    rendered as plain text until it is committed.
   </p>
 
   <div id="editor"></div>
@@ -93,9 +87,8 @@
       selection_end: 0,
     };
 
-    // Transient composition state, only used to visualize in-progress input.
+    // Transient composition state, only surfaced in the status line.
     let is_composing = false;
-    let composition_formats = [];  // TextFormat ranges from 'textformatupdate'
 
     // The single <p> element the model is rendered into.
     const paragraph = document.createElement('p');
@@ -138,13 +131,11 @@
       render();
     });
 
-    // 'textformatupdate' fires during composition. The IME tells us which
-    // text ranges should be decorated (e.g. underline the active clause).
-    // This is what lets us visualize the in-progress composition.
-    edit_context.addEventListener('textformatupdate', (event) => {
-      composition_formats = event.getTextFormats();
-      render();
-    });
+    // 'textformatupdate' fires during composition: the IME tells us which
+    // text ranges it wants decorated (e.g. underline the active clause).
+    // We deliberately ignore it and render composition text as plain text —
+    // a real editor would use these ranges to style the provisional text.
+    edit_context.addEventListener('textformatupdate', () => {});
 
     // 'characterboundsupdate' is the IME asking where certain characters
     // are on screen, so it can position its candidate window. We measure
@@ -166,8 +157,7 @@
 
     edit_context.addEventListener('compositionend', () => {
       is_composing = false;
-      composition_formats = [];
-      render();
+      update_status();
     });
 
     // ------------------------------------------------------------------
@@ -238,19 +228,12 @@
     // 6. Rendering  (model → DOM)
     // ------------------------------------------------------------------
     function render() {
-      // Rebuild the paragraph from the model: plain text, with any range
-      // that is currently being composed wrapped in a highlighted span.
+      // Rebuild the paragraph from the model. Composition text needs no
+      // special treatment: it is already part of doc.text while composing.
       paragraph.replaceChildren();
 
-      for (const segment of build_segments()) {
-        if (segment.composing) {
-          const span = document.createElement('span');
-          span.className = 'composing';
-          span.textContent = segment.text;
-          paragraph.append(span);
-        } else if (segment.text) {
-          paragraph.append(document.createTextNode(segment.text));
-        }
+      if (doc.text) {
+        paragraph.append(document.createTextNode(doc.text));
       }
 
       // A trailing <br> keeps an empty document / empty last line clickable.
@@ -260,35 +243,6 @@
 
       restore_dom_selection();
       update_status();
-    }
-
-    // Split the text into segments at the composition format boundaries.
-    function build_segments() {
-      if (composition_formats.length === 0) {
-        return [{ text: doc.text, composing: false }];
-      }
-
-      const boundaries = new Set([0, doc.text.length]);
-      for (const format of composition_formats) {
-        boundaries.add(format.rangeStart);
-        boundaries.add(format.rangeEnd);
-      }
-
-      const points = [...boundaries].sort((a, b) => a - b);
-      const segments = [];
-
-      for (let i = 0; i < points.length - 1; i++) {
-        const start = points[i];
-        const end = points[i + 1];
-        segments.push({
-          text: doc.text.slice(start, end),
-          composing: composition_formats.some(
-            (format) => start < format.rangeEnd && end > format.rangeStart
-          ),
-        });
-      }
-
-      return segments;
     }
 
     // After re-rendering, put the DOM caret/selection back where the model
