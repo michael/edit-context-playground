@@ -31,6 +31,15 @@
       margin: 0;
     }
 
+    /* Composition visualization via the CSS Custom Highlight API: styles
+       Range objects registered under CSS.highlights.set('composition', …)
+       without touching the DOM structure. Only paint-level properties
+       (background-color, color, text-decoration*, text-shadow) apply here. */
+    ::highlight(composition) {
+      background-color: rgb(255 220 0 / 0.4);
+      text-decoration: underline dotted 2px;
+    }
+
     #status {
       margin-top: 12px;
       font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace;
@@ -56,8 +65,8 @@
   <p>
     Click somewhere in the editor and type. Regular characters update the
     document directly. A dead key (e.g. <kbd>`</kbd> or <kbd>´</kbd>) or an IME
-    starts a composition — the provisional text lands in the model and is
-    rendered as plain text until it is committed.
+    starts a composition, which is underlined via a CSS custom highlight
+    while it is in progress — the DOM stays a plain text node throughout.
   </p>
 
   <div id="editor"></div>
@@ -87,8 +96,14 @@
       selection_end: 0,
     };
 
-    // Transient composition state, only surfaced in the status line.
+    // Transient composition state.
     let is_composing = false;
+    let composition_formats = [];  // TextFormat ranges from 'textformatupdate'
+
+    // Registered highlight that paints the composition decoration over
+    // arbitrary ranges of the text node — no DOM mutation involved.
+    const composition_highlight = new Highlight();
+    CSS.highlights.set('composition', composition_highlight);
 
     // The single <p> element the model is rendered into.
     const paragraph = document.createElement('p');
@@ -133,9 +148,12 @@
 
     // 'textformatupdate' fires during composition: the IME tells us which
     // text ranges it wants decorated (e.g. underline the active clause).
-    // We deliberately ignore it and render composition text as plain text —
-    // a real editor would use these ranges to style the provisional text.
-    edit_context.addEventListener('textformatupdate', () => {});
+    // We map the offsets to DOM ranges and hand them to the highlight —
+    // the rendered DOM structure is not affected.
+    edit_context.addEventListener('textformatupdate', (event) => {
+      composition_formats = event.getTextFormats();
+      update_composition_highlight();
+    });
 
     // 'characterboundsupdate' is the IME asking where certain characters
     // are on screen, so it can position its candidate window. We measure
@@ -157,6 +175,8 @@
 
     edit_context.addEventListener('compositionend', () => {
       is_composing = false;
+      composition_formats = [];
+      update_composition_highlight();
       update_status();
     });
 
@@ -241,8 +261,28 @@
         paragraph.append(document.createElement('br'));
       }
 
+      // The rebuild invalidated any ranges pointing into the old text node.
+      update_composition_highlight();
+
       restore_dom_selection();
       update_status();
+    }
+
+    // Rebuild the highlight ranges from the current composition formats.
+    // Ranges reference DOM text nodes directly, so this must run again
+    // after every render() (the old text node is gone after a rebuild).
+    function update_composition_highlight() {
+      composition_highlight.clear();
+
+      for (const format of composition_formats) {
+        const start = offset_to_dom_position(format.rangeStart);
+        const end = offset_to_dom_position(format.rangeEnd);
+
+        const range = new Range();
+        range.setStart(start.node, start.offset);
+        range.setEnd(end.node, end.offset);
+        composition_highlight.add(range);
+      }
     }
 
     // After re-rendering, put the DOM caret/selection back where the model
