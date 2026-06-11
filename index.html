@@ -44,6 +44,17 @@
       color: #666;
       white-space: pre-wrap;
     }
+
+    /* Live view of the editor's current DOM structure */
+    #dom_view {
+      margin-top: 12px;
+      padding: 12px;
+      background: #1e1e1e;
+      color: #d4d4d4;
+      font: 13px/1.6 ui-monospace, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
   </style>
 </head>
 
@@ -57,10 +68,12 @@
 
   <div id="editor"></div>
   <div id="status"></div>
+  <pre id="dom_view"></pre>
 
   <script>
     const editor = document.getElementById('editor');
     const status = document.getElementById('status');
+    const dom_view = document.getElementById('dom_view');
 
     if (!('EditContext' in window)) {
       editor.textContent = 'This browser does not support the EditContext API (try Chrome or Edge).';
@@ -363,6 +376,36 @@
         `model text (${doc.text.length} chars): ${JSON.stringify(doc.text)}\n` +
         `selection: [${doc.selection_start}, ${doc.selection_end}]` +
         (is_composing ? '  — composing…' : '');
+
+      dom_view.textContent = serialize_dom(editor);
+    }
+
+    // Serialize an element's DOM subtree into readable, indented HTML, so
+    // you can watch the structure change live (e.g. the <span
+    // class="composing"> appearing while a composition is active).
+    function serialize_dom(element, indent = '') {
+      let out = '';
+
+      for (const child of element.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          out += `${indent}"${child.data.replaceAll('\n', '\\n')}"\n`;
+        } else if (child.nodeType === Node.ELEMENT_NODE) {
+          const tag = child.tagName.toLowerCase();
+          const attrs = [...child.attributes]
+            .map((attr) => ` ${attr.name}="${attr.value}"`)
+            .join('');
+
+          if (child.childNodes.length === 0) {
+            out += `${indent}<${tag}${attrs}>\n`;
+          } else {
+            out += `${indent}<${tag}${attrs}>\n`;
+            out += serialize_dom(child, indent + '  ');
+            out += `${indent}</${tag}>\n`;
+          }
+        }
+      }
+
+      return out;
     }
 
     render();
